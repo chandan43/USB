@@ -3,12 +3,13 @@
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/usb.h>
-
+#include <linux/kref.h>
+#include <linux/types.h>
 /*Driver INFO*/
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("beingchandanjha@gamil.com");
 MODULE_DESCRIPTION("My first USB device driver");
-MODULE_VERSION(".1");
+MODULE_VERSION(".2");
 /* Define these values to match your devices */
 #define USB_SKEL_VENDOR_ID	0x0781
 #define USB_SKEL_PRODUCT_ID	0x5567
@@ -31,6 +32,19 @@ static const struct usb_device_id usb_table[]={
  *      or your driver's probe function will never get called.
 */
 MODULE_DEVICE_TABLE(usb,usb_table);
+
+
+/* Get a minor range for your devices from the usb maintainer */
+#define USB_SKEL_MINOR_BASE	192
+struct usb_dev {
+	struct usb_device* udev;                 /* the usb device for this device */
+	struct usb_interface * interface;       /* the interface for this device */
+	unsigned char * bulk_in_buffer;         /*the buffer to receive data */
+	size_t bulk_in_size;                   /*the size of the receive buffer */
+	__u8	bulk_in_endpointAddr;	/* the address of the bulk in endpoint */
+	__u8	bulk_out_endpointAddr;	/* the address of the bulk out endpoint */
+	struct kref kref;
+};
 
 /* * @probe: Called to see if the driver is willing to manage a particular
  *      interface on a device.  If it is, probe returns zero and uses
