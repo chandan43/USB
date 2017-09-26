@@ -6,6 +6,8 @@
 #include <linux/kref.h>
 #include <linux/types.h>
 #include <linux/errno.h>
+#include <linux/slab.h>
+
 /*Driver INFO*/
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("beingchandanjha@gamil.com");
@@ -86,6 +88,92 @@ static int usb_open(struct inode *inodep, struct file *filep){
 	return 0;
 exit:
 		return retval;
+}
+static  int usb_release(struct inode *inodep, struct file *filep){
+	struct usb_dev *dev;
+	dev=(struct usb_dev *)filep->private_data;
+	if (dev == NULL)
+		return -ENODEV;
+	/* decrement the count on our device */
+	kref_put(&dev->kref, usb_delete);
+	return 0;
+}
+
+static int  ssize_t usb_read(struct file *filep, char __user *buffer, size_t count, loff_t *offset){
+	struct usb_dev *dev;
+	dev=(struct usb_dev *)filep->private_data;
+	int retval = 0;
+	if(dev == NULL)
+		return -ENODEV;
+	/* do a blocking bulk read to get data from the device */
+	/*usb_bulk_msg : This function sends a simple bulk message to a specified endpoint and waits for the message to complete, or timeout. */
+	retval=usb_bulk_msg(dev->udev,usb_rcvbulkpipe(dev->udev,dev->bulk_in_endpointAddr),dev->bulk_in_buffer,min(dev->bulk_in_size,count), &count,HZ*10);
+	/*P1: A pointer to the USB device
+	 *p2: The specific endpoint of the USB device to which this bulk message is to be sent. This value is created with a call to either usb_sndbulkpipe or usb_rcvbulkpipe.
+	 *p3:A pointer to the data to send to the device if this is an OUT endpoint. If this is an IN endpoint, this is a pointer to where the data should be placed after being read from the device.
+	 *p4:The length of the buffer that is pointed to by the data parameter.min is defined in kernel.h
+	 *p5:A pointer to where the function places the actual number of bytes that have either been transferred to the device or received from the device, depending on the direction of the endpoint.
+	*p6: The amount of time, in jiffies, that should be waited before timing out.
+	*HZ : value for i386 was changed to 1000, yeilding a jiffy interval of 1 ms. Recently (2.6.13) the kernel changed HZ for i386 to 250. (1000 was deemed too high).*/
+ 	/*If successful, it returns 0, otherwise a negative error number. */
+	/* if the read was successful, copy the data to userspace */
+	if(!retval){
+		if(copy_to_user(buffer, dev->bulk_in_buffer, count))  //  On success, this will be zero. 
+			return -EFAULT;
+		else 
+			return count;
+	}
+	return retval;
+}
+
+static ssize_t usb_write(struct file *filep, const char __user *buffer, size_t count, loff_t *offset){
+	struct usb_dev *dev;
+	int retval;
+	struct urb *urb=NULL;  /* struct urb - USB Request Block*/
+	char *buf = NULL;
+	dev=(struct usb_dev *)filep->private_data;
+	/* verify that we actually have some data to write */
+	if (count == 0)
+		goto exit;
+	/* create a urb, and a buffer for it, and copy the data to the urb.URBs are allocated with the following call*/
+	urb=usb_alloc_urb(0,GFP_KERNEL);  /* If the return value is NULL, some error occurred within the USB core*/
+	/*p1:iso_packets If the driver want to use this urb for interrupt, control, or bulk endpoints, pass '0' as the number of iso packets. */
+	if(!urb){
+		retval = -ENOMEM;
+		goto error;
+	}
+	/*usb_buffer_alloc() is renamed to usb_alloc_coherent(), allocate dma-consistent buffer for URB_NO_xxx_DMA_MAP*/
+	buf=usb_alloc_coherent(dev->udev,count,GFP_KERNEL,&urb->transfer_dma);/*dma_addr_t transfer_dma;  (in) dma addr for transfer_buffer */
+	if (!buf) {
+		retval = -ENOMEM;
+		goto error;
+	}
+	if (copy_from_user(buf, buffer, count)) {
+		retval = -EFAULT;
+		goto error;
+	}
+/**
+ * usb_fill_bulk_urb - macro to help initialize a bulk urb
+ * @urb: pointer to the urb to initialize.
+ * @dev: pointer to the struct usb_device for this urb.
+ * @pipe: the endpoint pipe  : usb_sndbulkpipe(dev, endpoint)
+ * @transfer_buffer: pointer to the transfer buffer
+ * @buffer_length: length of the transfer buffer
+ * @complete_fn: pointer to the usb_complete_t function
+ * @context: what to set the urb context to.
+ *
+ * Initializes a bulk urb with the proper information needed to submit it
+ * to a device.
+ */
+      usb_fill_bulk_urb(urb,dev->udev,usb_sndbulkpipe(dev->udev,dev->bulk_out_endpointAddr),buf,count,,dev);
+	
+exit:
+	return count;
+error:
+	usb_free_coherent(dev->udev,count,buf,urb->transfer_dma);
+	usb_free_urb(urb);
+	kfree(buf);
+	return retval;
 }
 /* * @probe: Called to see if the driver is willing to manage a particular
  *      interface on a device.  If it is, probe returns zero and uses
