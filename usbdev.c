@@ -234,9 +234,34 @@ struct usb_class_driver usb_class={
 	.minor_base = USB_SKEL_MINOR_BASE,
 };
 
-static int usb_probe(struct usb_interface *intf,const struct usb_device_id *id){
-	   pr_info("USB device  (%04X:%04X) is plugged\n", id->idVendor, id->idProduct);
+static int usb_probe(struct usb_interface *interface,const struct usb_device_id *id){
+//	   pr_info("USB device  (%04X:%04X) is plugged\n", id->idVendor, id->idProduct);
+           struct usb_dev *dev=NULL;
+	   struct usb_host_interface *interface_disc; 
+	   struct usb_endpoint_descriptor *endpoint;
+	   size_t buffer_size;
+	   int i;
+	   int retval = -ENOMEM;
+	   /* allocate memory for our device state and initialize it */
+	   dev=kmalloc(sizeof(struct usb_dev),GFP_KERNEL);
+	   if(dev==NULL){
+	   	pr_err("kmalloc: Out of memory\n");
+		goto error;
+	   }
+	   memset(dev,0x00,sizeof(*dev)); /*Clearing memory*/
+	   kref_get(&dev->kref);  /*This sets the refcount in the kref to 1.*/
+	   /*usb_get_dev — increments the reference count of the usb device structure*/
+	   dev->udev=usb_get_dev(interface_to_usbdev(interface));  /* interface_to_usbdev is convert interface to udev*/
+	   dev->interface=interface;
+	   /* set up the endpoint information */
+	   /* use only the first bulk-in and bulk-out endpoints */
+	   
+
     	   return 0;
+error:
+	   if(dev)
+		   kref_put(dev->kref,usb_delete);
+	   return retval;
 }
 
 /* @disconnect: Called when the interface is no longer accessible, usually
@@ -247,7 +272,6 @@ void usb_disconnect(struct usb_interface *intf){
 }
 
 struct usb_driver usb_drv={
-//	.owner = THIS_MODULE,
 	.name="usbdev", 
 	.id_table= usb_table,
 	.probe= usb_probe,
