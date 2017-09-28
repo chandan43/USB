@@ -1,3 +1,17 @@
+/*
+ * USB driver 
+ *
+ * This driver is based on the 2.6.3 version of drivers/usb/usb-skeleton.c
+ * but has been rewritten to be easier to read and use.
+ * Reference:  	
+ * http://www.makelinux.net/ldd3/chp-13-sect-4
+ * http://ecee.colorado.edu/~siewerts/extra/code/example_code_archive/a490dmis_code/examples-driver/usb/usb-skeleton.c
+ * https://www.kernel.org/doc/Documentation/kref.txt
+ * https://www.kernel.org/doc/Documentation/usb/dma.txt
+ * https://www.kernel.org/doc/Documentation/usb/URB.txt
+ * Before writing USB Device drive Please go throgh above mentioned link. 
+ */
+
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -32,7 +46,7 @@ static const struct usb_device_id usb_table[]={
 /*@id_table: USB drivers use ID table to support hotplugging.
  *      Export this with MODULE_DEVICE_TABLE(usb,...).  This must be set
  *      or your driver's probe function will never get called.
-*/
+ */
 MODULE_DEVICE_TABLE(usb,usb_table);
 
 
@@ -46,6 +60,7 @@ struct usb_dev {
 	__u8	bulk_in_endpointAddr;	/* the address of the bulk in endpoint */
 	__u8	bulk_out_endpointAddr;	/* the address of the bulk out endpoint */
 	struct kref kref;              
+	spinlock_t lock;
 };
 /*krefs allow you to add reference counters to your objects.  If you
  * have objects that are used in multiple places and passed around, and
@@ -86,7 +101,7 @@ static int usb_open(struct inode *inodep, struct file *filep){
 	filep->private_data=dev;
 	return 0;
 exit:
-		return retval;
+	return retval;
 }
 static  int usb_release(struct inode *inodep, struct file *filep){
 	struct usb_dev *dev;
@@ -109,12 +124,12 @@ static int  ssize_t usb_read(struct file *filep, char __user *buffer, size_t cou
 	retval=usb_bulk_msg(dev->udev,usb_rcvbulkpipe(dev->udev,dev->bulk_in_endpointAddr),dev->bulk_in_buffer,min(dev->bulk_in_size,count), &count,HZ*10);
 	/*P1: A pointer to the USB device
 	 *p2: The specific endpoint of the USB device to which this bulk message is to be sent. This value is created with a call to either usb_sndbulkpipe or usb_rcvbulkpipe.
-	 *p3:A pointer to the data to send to the device if this is an OUT endpoint. If this is an IN endpoint, this is a pointer to where the data should be placed after being read from the device.
+	 *p3:A pointer to the data to send to the device if this is an OUT endpoint. If this is an IN endpoint, this is a pointer to where the data should be placed after being read from         the device.
 	 *p4:The length of the buffer that is pointed to by the data parameter.min is defined in kernel.h
-	 *p5:A pointer to where the function places the actual number of bytes that have either been transferred to the device or received from the device, depending on the direction of the endpoint.
-	*p6: The amount of time, in jiffies, that should be waited before timing out.
-	*HZ : value for i386 was changed to 1000, yeilding a jiffy interval of 1 ms. Recently (2.6.13) the kernel changed HZ for i386 to 250. (1000 was deemed too high).*/
- 	/*If successful, it returns 0, otherwise a negative error number. */
+	 *p5:A pointer to where the function places the actual number of bytes that have either been transferred to the device or received from the device, depending on the direction of            the endpoint.
+	 *p6: The amount of time, in jiffies, that should be waited before timing out.
+	 *HZ : value for i386 was changed to 1000, yeilding a jiffy interval of 1 ms. Recently (2.6.13) the kernel changed HZ for i386 to 250. (1000 was deemed too high).*/
+	/*If successful, it returns 0, otherwise a negative error number. */
 	/* if the read was successful, copy the data to userspace */
 	if(!retval){
 		if(copy_to_user(buffer, dev->bulk_in_buffer, count))  //  On success, this will be zero. 
@@ -167,31 +182,31 @@ static ssize_t usb_write(struct file *filep, const char __user *buffer, size_t c
 		retval = -EFAULT;
 		goto error;
 	}
-/**
- * usb_fill_bulk_urb - macro to help initialize a bulk urb
- * @urb: pointer to the urb to initialize.
- * @dev: pointer to the struct usb_device for this urb.
- * @pipe: the endpoint pipe  : usb_sndbulkpipe(dev, endpoint)
- * @transfer_buffer: pointer to the transfer buffer
- * @buffer_length: length of the transfer buffer
- * @complete_fn: pointer to the usb_complete_t function
- * @context: what to set the urb context to.
- *
- * Initializes a bulk urb with the proper information needed to submit it
- * to a device.
- */
-      usb_fill_bulk_urb(urb,dev->udev,usb_sndbulkpipe(dev->udev,dev->bulk_out_endpointAddr),buf,count,usb_write_bulk_callback,dev);
+	/**
+	 * usb_fill_bulk_urb - macro to help initialize a bulk urb
+	 * @urb: pointer to the urb to initialize.
+	 * @dev: pointer to the struct usb_device for this urb.
+	 * @pipe: the endpoint pipe  : usb_sndbulkpipe(dev, endpoint)
+	 * @transfer_buffer: pointer to the transfer buffer
+	 * @buffer_length: length of the transfer buffer
+	 * @complete_fn: pointer to the usb_complete_t function
+	 * @context: what to set the urb context to.
+	 *
+	 * Initializes a bulk urb with the proper information needed to submit it
+	 * to a device.
+	 */
+	usb_fill_bulk_urb(urb,dev->udev,usb_sndbulkpipe(dev->udev,dev->bulk_out_endpointAddr),buf,count,usb_write_bulk_callback,dev);
 	/*set URB_NO_TRANSFER_DMA_MAP so that usbcore won't map or unmap the buffer.*/
-      /*If short packets should NOT be tolerated, set URB_SHORT_NOT_OK in transfer_flags.*/
-      urb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
-      /* send the data out the bulk port */
-      retval=usb_submit_urb(urb, GFP_KERNEL); //ON submit return 0.
-      if(retval){
-	      pr_err("%s: failed submitting write urb, error %d",__func__,retval);
-	      goto error;
-      }
-    /* release our reference to this urb, the USB core will eventually free it entirely */
-       usb_free_urb(urb);
+	/*If short packets should NOT be tolerated, set URB_SHORT_NOT_OK in transfer_flags.*/
+	urb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
+	/* send the data out the bulk port */
+	retval=usb_submit_urb(urb, GFP_KERNEL); //ON submit return 0.
+	if(retval){
+		pr_err("%s: failed submitting write urb, error %d",__func__,retval);
+		goto error;
+	}
+	/* release our reference to this urb, the USB core will eventually free it entirely */
+	usb_free_urb(urb);
 
 exit:
 	return count;
@@ -230,45 +245,110 @@ static struct file_operations usb_fops = {
  */
 struct usb_class_driver usb_class={
 	.name="usbdrv%d"
-	.fops=&usb_fops,
+		.fops=&usb_fops,
 	.minor_base = USB_SKEL_MINOR_BASE,
 };
 
 static int usb_probe(struct usb_interface *interface,const struct usb_device_id *id){
-//	   pr_info("USB device  (%04X:%04X) is plugged\n", id->idVendor, id->idProduct);
-           struct usb_dev *dev=NULL;
-	   struct usb_host_interface *interface_disc; 
-	   struct usb_endpoint_descriptor *endpoint;
-	   size_t buffer_size;
-	   int i;
-	   int retval = -ENOMEM;
-	   /* allocate memory for our device state and initialize it */
-	   dev=kmalloc(sizeof(struct usb_dev),GFP_KERNEL);
-	   if(dev==NULL){
-	   	pr_err("kmalloc: Out of memory\n");
+	struct usb_dev *dev=NULL;
+	struct usb_host_interface *interface_disc; 
+	struct usb_endpoint_descriptor *endpoint;
+	size_t buffer_size;
+	int i;
+	int retval = -ENOMEM;
+	/* allocate memory for our device state and initialize it */
+	dev=kmalloc(sizeof(struct usb_dev),GFP_KERNEL);
+	if(dev==NULL){
+		pr_err("kmalloc: Out of memory\n");
 		goto error;
-	   }
-	   memset(dev,0x00,sizeof(*dev)); /*Clearing memory*/
-	   kref_get(&dev->kref);  /*This sets the refcount in the kref to 1.*/
-	   /*usb_get_dev — increments the reference count of the usb device structure*/
-	   dev->udev=usb_get_dev(interface_to_usbdev(interface));  /* interface_to_usbdev is convert interface to udev*/
-	   dev->interface=interface;
-	   /* set up the endpoint information */
-	   /* use only the first bulk-in and bulk-out endpoints */
-	   
-
-    	   return 0;
+	}
+	spin_lock_init(&dev->lock);
+	memset(dev,0x00,sizeof(*dev)); /*Clearing memory*/
+	kref_get(&dev->kref);  /*This sets the refcount in the kref to 1.*/
+	/*usb_get_dev — increments the reference count of the usb device structure*/
+	dev->udev=usb_get_dev(interface_to_usbdev(interface));  /* interface_to_usbdev is convert interface to udev*/
+	dev->interface=interface;
+	/* set up the endpoint information */
+	/* use only the first bulk-in and bulk-out endpoints */
+	interface_disc=interface->cur_altsetting;   /* The currently active alternate setting */
+	/* struct usb_host_endpoint *endpoint; 
+	 * array of desc.bNumEndpoints endpoints associated with this
+	 * * interface setting.  these will be in no particular order.
+	 */
+	/**
+	 * usb_endpoint_type - get the endpoint's transfer type
+	 * @epd: endpoint to be checked
+	 * Returns one of USB_ENDPOINT_XFER_{CONTROL, ISOC, BULK, INT} according
+	 * to @epd's transfer type.
+	 */
+	/*This block of code first loops over every endpoint that is present in this interface and assigns a local pointer to the endpoint structure to make it easier to access later:
+	 *Then, after we have an endpoint, and we have not found a bulk IN type endpoint already, we look to see if this endpoint's direction is IN.
+	 *hat can be tested by seeing whether the bitmask USB_DIR_IN is contained in the bEndpointAddress endpoint variable. If this is true, we determine whether the endpoint type is bu	   *or not, by first masking off the bmAttributes variable with the USB_ENDPOINT_XFERTYPE_MASK bitmask, and then checking if it matches the value USB_ENDPOINT_XFER_BULK:
+	 */
+	for(i=0;i< interface_disc->disc.bNumEndpoints;++i){  /*  Usb device driver usually want to detect wahat the endpoint address and buffer size are for the devices*/
+		endpoint=interface_disc->endpoint[i].disc;      /*  @desc: descriptor for this endpoint, wMaxPacketSize in native byteorder*/
+		//if((!dev->bulk_in_endpointAddr && (endpoint->bEndpointAddress & USB_DIR_IN) && usb_endpoint_type(endpoint))==USB_ENDPOINT_XFER_BULK) {
+		if((!dev->bulk_in_endpointAddr && usb_endpoint_dir_in(endpoint) && usb_endpoint_type(endpoint))==USB_ENDPOINT_XFER_BULK) {
+			/*Used to signify direction of data for a UsbEndpoint is IN (device to host) */
+			/* we found a bulk in endpoint */
+			buffer_size=endpoint->wMaxPacketSize;
+			dev->bulk_in_size=buffer_size;
+			dev->bulk_in_endpointAddr=endpoint->bEndpointAddress;
+			dev->bulk_in_buffer=kmalloc(buffer_size,GFP_KERNEL);
+			if(dev->bulk_in_buffer==NULL){
+				pr_err("kmalloc: Couldn't alloc memory-bulk_in_buffer\n");
+				goto error; 
+			}
+		}
+		//if((!dev->bulk_out_endpointAddr && !(endpoint->bEndpointAddress & USB_DIR_IN) && usb_endpoint_type(endpoint))==USB_ENDPOINT_XFER_BULK){
+		if((!dev->bulk_in_endpointAddr && usb_endpoint_dir_out(endpoint) && usb_endpoint_type(endpoint))==USB_ENDPOINT_XFER_BULK) {
+			/* we found a bulk out endpoint */
+			dev->bulk_out_endpointAddr=endpoint->bEndpointAddress;                              
+			/*endpoint->bEndpointAddress:The address of the endpoint described by this descriptor. 
+			 *Bits 0:3 are the endpoint number. Bits 4:6 are reserved. Bit 7 indicates direction*/
+		}
+	}
+	if(!(dev->bulk_out_endpointAddr && dev->bulk_in_endpointAddr)){
+		pr_err("ENDPOINT: Could not find both bulk-in and bulk-out endpoints\n");
+		goto error;
+	}
+	/* save our data pointer in this interface device */
+	/*Because the USB driver needs to retrieve the local data structure that is associated with this 
+	 *struct usb_interface later in the lifecycle of the device, the function usb_set_intfdata can be called*/
+	usb_set_intfdata(interface, dev);
+	/* we can register the device now, as it is ready */
+	retval=usb_register_dev(interface,&usb_class); /*ON success return 0;*/
+	if(retval){
+		/* something prevented us from registering this driver */
+		pr_err("usb_register_dev: Not able to get a minor for this device.\n");
+		usb_set_intfdata(interface, NULL);
+		goto error;
+	}
+	/* let the user know what node this device is now attached to */
+	pr_info("USB device now attached to USBdrv-%d", interface->minor);
+	pr_info("USB device  (%04X:%04X) is plugged\n", id->idVendor, id->idProduct);
+	return 0;
 error:
-	   if(dev)
-		   kref_put(dev->kref,usb_delete);
-	   return retval;
+	if(dev)
+		kref_put(dev->kref,usb_delete);
+	return retval;
 }
-
 /* @disconnect: Called when the interface is no longer accessible, usually
- *      because its device has been (or is being) disconnected or the
- *      driver module is being unloaded.*/
-void usb_disconnect(struct usb_interface *intf){
-	pr_info("USB device is disconnected\n");
+*      because its device has been (or is being) disconnected or the
+*      driver module is being unloaded.*/
+void usb_disconnect(struct usb_interface *interface){
+	struct usb_dev *dev;
+	int minor = interface->minor;  /* minor number this interface is bound to */
+	/* prevent skel_open() from racing skel_disconnect() */
+        spin_lock(&dev->lock);
+	dev=usb_set_intfdata(interface, dev);
+	usb_set_intfdata(interface, NULL);
+	/* give back our minor */
+ 	usb_deregister_dev(interface, &usb_class);
+	spin_unlock(&dev->lock);
+	/* decrement our usage count */
+	kref_put(&dev->kref, skel_delete);
+	pr_info("USB drv #%d now disconnected", minor);
 }
 
 struct usb_driver usb_drv={
