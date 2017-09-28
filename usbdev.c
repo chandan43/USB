@@ -22,14 +22,17 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <asm/uaccess.h>
+#include <linux/mutex.h>
+
 /*Driver INFO*/
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("beingchandanjha@gamil.com");
 MODULE_DESCRIPTION("My first USB device driver");
 MODULE_VERSION(".2");
 /* Define these values to match your devices */
-#define USB_SKEL_VENDOR_ID	0x0781
-#define USB_SKEL_PRODUCT_ID	0x5567
+
+#define USB_SKEL_VENDOR_ID	0x14cd
+#define USB_SKEL_PRODUCT_ID	0x1212
 /**
  * USB_DEVICE - macro used to describe a specific usb device
  * @vend: the 16 bit USB Vendor ID
@@ -61,6 +64,7 @@ struct usb_dev {
 	__u8	bulk_out_endpointAddr;	/* the address of the bulk out endpoint */
 	struct kref kref;              
 	spinlock_t lock;
+	struct mutex  io_mutex;		/* synchronize I/O with disconnect */
 };
 /*krefs allow you to add reference counters to your objects.  If you
  * have objects that are used in multiple places and passed around, and
@@ -69,9 +73,9 @@ struct usb_dev {
 
 /*Macro sets up a pointer that points to the struct device_driver passed to the code . The macro to get a pointer to struct usb_dev by using:*/
 #define to_usb_dev(d) container_of(d, struct usb_dev, kref);
-struct struct usb_driver usb_drv;
+static struct usb_driver usb_drv;
 static void usb_delete(struct kref *ref){
-	struct usb_dev *dev=to_usb_dev(kref);
+	struct usb_dev *dev=to_usb_dev(ref);
 	usb_put_dev(dev->udev); /*release a use of the usb device structure.Must be called when a user of a device is finished with it*/
 	kfree(dev->bulk_in_buffer);  /*Free buffer*/
 	kfree (dev);   /*Free device*/
@@ -113,15 +117,15 @@ static  int usb_release(struct inode *inodep, struct file *filep){
 	return 0;
 }
 
-static int  ssize_t usb_read(struct file *filep, char __user *buffer, size_t count, loff_t *offset){
+static ssize_t usb_read(struct file *filep,char __user *buffer,size_t count,loff_t *offset){
+	int retval=0;
 	struct usb_dev *dev;
 	dev=(struct usb_dev *)filep->private_data;
-	int retval = 0;
 	if(dev == NULL)
 		return -ENODEV;
 	/* do a blocking bulk read to get data from the device */
 	/*usb_bulk_msg : This function sends a simple bulk message to a specified endpoint and waits for the message to complete, or timeout. */
-	retval=usb_bulk_msg(dev->udev,usb_rcvbulkpipe(dev->udev,dev->bulk_in_endpointAddr),dev->bulk_in_buffer,min(dev->bulk_in_size,count), &count,HZ*10);
+	retval=usb_bulk_msg(dev->udev,usb_rcvbulkpipe(dev->udev,dev->bulk_in_endpointAddr),dev->bulk_in_buffer,min(dev->bulk_in_size,count), (int *)&count,HZ*10);
 	/*P1: A pointer to the USB device
 	 *p2: The specific endpoint of the USB device to which this bulk message is to be sent. This value is created with a call to either usb_sndbulkpipe or usb_rcvbulkpipe.
 	 *p3:A pointer to the data to send to the device if this is an OUT endpoint. If this is an IN endpoint, this is a pointer to where the data should be placed after being read from         the device.
@@ -224,7 +228,7 @@ error:
  *      return -ENODEV, if genuine IO errors occurred, an appropriate
  *      negative errno value. */
 
-static struct file_operations usb_fops = {
+static struct file_operations usb_fops= {
 	.owner   = THIS_MODULE,
 	.read   = usb_read,
 	.write  = usb_write,
@@ -244,8 +248,8 @@ static struct file_operations usb_fops = {
  * parameters used for them.
  */
 struct usb_class_driver usb_class={
-	.name="usbdrv%d"
-		.fops=&usb_fops,
+	.name="usbdrv%d",
+	.fops=&usb_fops,
 	.minor_base = USB_SKEL_MINOR_BASE,
 };
 
@@ -262,6 +266,7 @@ static int usb_probe(struct usb_interface *interface,const struct usb_device_id 
 		pr_err("kmalloc: Out of memory\n");
 		goto error;
 	}
+	mutex_init(&dev->io_mutex);
 	spin_lock_init(&dev->lock);
 	memset(dev,0x00,sizeof(*dev)); /*Clearing memory*/
 	kref_get(&dev->kref);  /*This sets the refcount in the kref to 1.*/
@@ -285,12 +290,23 @@ static int usb_probe(struct usb_interface *interface,const struct usb_device_id 
 	 *Then, after we have an endpoint, and we have not found a bulk IN type endpoint already, we look to see if this endpoint's direction is IN.
 	 *hat can be tested by seeing whether the bitmask USB_DIR_IN is contained in the bEndpointAddress endpoint variable. If this is true, we determine whether the endpoint type is bu	   *or not, by first masking off the bmAttributes variable with the USB_ENDPOINT_XFERTYPE_MASK bitmask, and then checking if it matches the value USB_ENDPOINT_XFER_BULK:
 	 */
-	for(i=0;i< interface_disc->disc.bNumEndpoints;++i){  /*  Usb device driver usually want to detect wahat the endpoint address and buffer size are for the devices*/
-		endpoint=interface_disc->endpoint[i].disc;      /*  @desc: descriptor for this endpoint, wMaxPacketSize in native byteorder*/
-		//if((!dev->bulk_in_endpointAddr && (endpoint->bEndpointAddress & USB_DIR_IN) && usb_endpoint_type(endpoint))==USB_ENDPOINT_XFER_BULK) {
-		if((!dev->bulk_in_endpointAddr && usb_endpoint_dir_in(endpoint) && usb_endpoint_type(endpoint))==USB_ENDPOINT_XFER_BULK) {
+	for(i=0;i < interface_disc->desc.bNumEndpoints; ++i){  /*  Usb device driver usually want to detect wahat the endpoint address and buffer size are for the devices*/
+		endpoint=&interface_disc->endpoint[i].desc;      /*  @desc: descriptor for this endpoint, wMaxPacketSize in native byteorder*/
+			pr_info("Endpoint_info: %d\n",!dev->bulk_in_endpointAddr);
+			pr_info("Endpoint_DIR: %d\n",usb_endpoint_dir_in(endpoint));
+			pr_info("Endpoint_DIR-1: %d\n",(endpoint->bEndpointAddress & USB_DIR_IN) );
+			pr_info("Endpoint_DIR-out: %d\n",!(endpoint->bEndpointAddress & USB_DIR_IN) );
+			pr_info("Endpoint_TYPE: %d\n",usb_endpoint_type(endpoint));
+			pr_info("Endpoint_TYPE-1: %d\n",(endpoint->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK));
+			pr_info("ENDPOINT_all-1: %d\n", (!dev->bulk_in_endpointAddr && (endpoint->bEndpointAddress & USB_DIR_IN) && (endpoint->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK)));
+			pr_info("ENDPOINT_all: %d\n", (!dev->bulk_in_endpointAddr && (endpoint->bEndpointAddress & USB_DIR_IN) && usb_endpoint_type(endpoint)));
+			pr_info("ENDPOINT_allout: %d\n", (!dev->bulk_in_endpointAddr && !(endpoint->bEndpointAddress & USB_DIR_IN) && usb_endpoint_type(endpoint)));
+			pr_info("USB_ENDPOINT_XFER_BULK: %d\n",USB_ENDPOINT_XFER_BULK);
+		if((!dev->bulk_in_endpointAddr && (endpoint->bEndpointAddress & USB_DIR_IN) && usb_endpoint_type(endpoint))==USB_ENDPOINT_XFER_BULK) {
+		//if((!dev->bulk_in_endpointAddr && usb_endpoint_dir_in(endpoint) && usb_endpoint_type(endpoint))==USB_ENDPOINT_XFER_BULK) {
 			/*Used to signify direction of data for a UsbEndpoint is IN (device to host) */
 			/* we found a bulk in endpoint */
+			pr_info("USB_DIR_IN\n");
 			buffer_size=endpoint->wMaxPacketSize;
 			dev->bulk_in_size=buffer_size;
 			dev->bulk_in_endpointAddr=endpoint->bEndpointAddress;
@@ -300,9 +316,10 @@ static int usb_probe(struct usb_interface *interface,const struct usb_device_id 
 				goto error; 
 			}
 		}
-		//if((!dev->bulk_out_endpointAddr && !(endpoint->bEndpointAddress & USB_DIR_IN) && usb_endpoint_type(endpoint))==USB_ENDPOINT_XFER_BULK){
-		if((!dev->bulk_in_endpointAddr && usb_endpoint_dir_out(endpoint) && usb_endpoint_type(endpoint))==USB_ENDPOINT_XFER_BULK) {
+		if((!dev->bulk_out_endpointAddr && !(endpoint->bEndpointAddress & USB_DIR_IN) && usb_endpoint_type(endpoint))==USB_ENDPOINT_XFER_BULK){
+		//if((!dev->bulk_in_endpointAddr && usb_endpoint_dir_out(endpoint) && usb_endpoint_type(endpoint))==USB_ENDPOINT_XFER_BULK) {
 			/* we found a bulk out endpoint */
+			pr_info("USB_DIR_OUT\n");
 			dev->bulk_out_endpointAddr=endpoint->bEndpointAddress;                              
 			/*endpoint->bEndpointAddress:The address of the endpoint described by this descriptor. 
 			 *Bits 0:3 are the endpoint number. Bits 4:6 are reserved. Bit 7 indicates direction*/
@@ -330,7 +347,7 @@ static int usb_probe(struct usb_interface *interface,const struct usb_device_id 
 	return 0;
 error:
 	if(dev)
-		kref_put(dev->kref,usb_delete);
+		kref_put(&dev->kref,usb_delete);
 	return retval;
 }
 /* @disconnect: Called when the interface is no longer accessible, usually
@@ -340,18 +357,20 @@ void usb_disconnect(struct usb_interface *interface){
 	struct usb_dev *dev;
 	int minor = interface->minor;  /* minor number this interface is bound to */
 	/* prevent skel_open() from racing skel_disconnect() */
-        spin_lock(&dev->lock);
-	dev=usb_set_intfdata(interface, dev);
+	dev=usb_get_intfdata(interface);
+        //spin_lock(&dev->lock);
+	mutex_lock(&dev->io_mutex);
 	usb_set_intfdata(interface, NULL);
 	/* give back our minor */
  	usb_deregister_dev(interface, &usb_class);
-	spin_unlock(&dev->lock);
+//	spin_unlock(&dev->lock);
+	mutex_unlock(&dev->io_mutex);
 	/* decrement our usage count */
-	kref_put(&dev->kref, skel_delete);
+	kref_put(&dev->kref, usb_delete);
 	pr_info("USB drv #%d now disconnected", minor);
 }
 
-struct usb_driver usb_drv={
+static struct usb_driver usb_drv={
 	.name="usbdev", 
 	.id_table= usb_table,
 	.probe= usb_probe,
